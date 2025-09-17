@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLB Payroll vs. Performance Dashboard (2025)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .chart-container { position: relative; height: 50vh; width: 100%; }
+        .loader { border: 8px solid #f3f3f3; border-top: 8px solid #3498db; border-radius: 50%; width: 60px; height: 60px; animation: spin 2s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-gray-50">
+
+    <div id="app" class="w-full max-w-7xl mx-auto p-4 md:p-6">
+        <div class="bg-white rounded-lg shadow-xl p-4 md:p-6">
+            <!-- Header -->
+            <div class="text-center mb-6">
+                <h1 class="text-2xl md:text-4xl font-bold text-gray-800">MLB Payroll vs. Performance Dashboard</h1>
+                <p class="text-gray-600 mt-2">2025 Season Interactive Analysis | <span id="lastUpdated"></span></p>
+            </div>
+
+            <!-- Loading Spinner -->
+            <div id="loader" class="flex justify-center items-center h-96">
+                <div class="loader"></div>
+            </div>
+            
+            <!-- Dashboard Content (hidden until data loads) -->
+            <div id="dashboardContent" class="hidden">
+                <!-- Controls -->
+                <div class="flex flex-col sm:flex-row flex-wrap gap-4 mb-6 justify-center items-center p-4 bg-gray-50 rounded-lg">
+                    <div class="flex gap-2">
+                        <button data-view="scatter" class="view-btn px-4 py-2 rounded-md text-sm font-medium transition-colors bg-blue-600 text-white shadow">Scatter Plot</button>
+                        <button data-view="bar" class="view-btn px-4 py-2 rounded-md text-sm font-medium transition-colors bg-gray-200 text-gray-700 hover:bg-gray-300">Bar Chart</button>
+                        <button data-view="table" class="view-btn px-4 py-2 rounded-md text-sm font-medium transition-colors bg-gray-200 text-gray-700 hover:bg-gray-300">Data Table</button>
+                    </div>
+
+                    <select id="sortBy" class="px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="winPct">Sort by Win %</option>
+                        <option value="payroll">Sort by Payroll</option>
+                        <option value="efficiency">Sort by Efficiency</option>
+                    </select>
+
+                    <select id="filterQuadrant" class="px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="all">All Teams</option>
+                        <option value="high-high">Big Spenders (Success)</option>
+                        <option value="low-high">Overachievers</option>
+                        <option value="high-low">Underachievers</option>
+                        <option value="low-low">Rebuilding</option>
+                    </select>
+                </div>
+
+                <!-- Main Visualization Area -->
+                <div id="visualization" class="w-full min-h-[26rem] p-2">
+                    <div id="scatterPlotContainer" class="chart-container">
+                        <canvas id="scatterChart"></canvas>
+                    </div>
+                    <div id="barChartContainer" class="chart-container hidden">
+                        <canvas id="barChart"></canvas>
+                    </div>
+                    <div id="tableContainer" class="hidden overflow-x-auto"></div>
+                </div>
+
+                <!-- Quick Stats -->
+                <div id="quickStats" class="mt-8 grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+
+                <!-- Key Insights -->
+                <div class="mt-6 bg-gray-100 p-4 rounded-lg">
+                    <h3 class="font-bold mb-2 text-gray-800">Key Insights:</h3>
+                    <div id="keyInsights" class="text-sm space-y-2 text-gray-700"></div>
+                </div>
+            </div>
+        </div>
+        <footer class="text-center text-xs text-gray-500 mt-4">
+            Dashboard by Gemini | Data sourced from public APIs.
+        </footer>
+    </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // --- CONFIG & DOM ELEMENTS ---
+    const PAYROLL_URL = 'https://gist.githubusercontent.com/gemini-builder/b40458632c8f7142a59a5840b223c8dd/raw/mlb_payrolls_2025.json';
+    const STANDINGS_URL = 'https://gist.githubusercontent.com/gemini-builder/4222b0906b911d13dc2c74d0843403e0/raw/mlb_standings_2025.json';
+
+    const state = {
+        activeView: 'scatter',
+        sortBy: 'winPct',
+        filterQuadrant: 'all',
+        chartInstance: null,
+        barChartInstance: null,
+        enrichedData: [],
+    };
+
+    const dom = {
+        loader: document.getElementById('loader'),
+        dashboardContent: document.getElementById('dashboardContent'),
+        lastUpdated: document.getElementById('lastUpdated'),
+        viewBtns: document.querySelectorAll('.view-btn'),
+        sortBySelect: document.getElementById('sortBy'),
+        filterQuadrantSelect: document.getElementById('filterQuadrant'),
+        scatterPlotContainer: document.getElementById('scatterPlotContainer'),
+        barChartContainer: document.getElementById('barChartContainer'),
+        tableContainer: document.getElementById('tableContainer'),
+        quickStats: document.getElementById('quickStats'),
+        keyInsights: document.getElementById('keyInsights'),
+    };
+
+    // --- DATA FETCHING & PROCESSING ---
+    async function fetchData() {
+        try {
+            const [payrollRes, standingsRes] = await Promise.all([fetch(PAYROLL_URL), fetch(STANDINGS_URL)]);
+            if (!payrollRes.ok || !standingsRes.ok) throw new Error('Network response was not ok.');
+            
+            const payrollData = await payrollRes.json();
+            const standingsData = await standingsRes.json();
+            
+            dom.lastUpdated.textContent = `Last Updated: ${new Date(standingsData.lastUpdated).toLocaleString()}`;
+            
+            return processData(payrollData.teams, standingsData.teams);
+        } catch (error) {
+            console.error("Failed to fetch or process data:", error);
+            dom.loader.innerHTML = '<p class="text-red-500">Failed to load live data. Please try again later.</p>';
+            return null;
+        }
+    }
+
+    function processData(payrolls, standings) {
+        const standingsMap = new Map(standings.map(t => [t.team, t]));
+        
+        const data = payrolls.map(payrollTeam => {
+            const standing = standingsMap.get(payrollTeam.team);
+            if (!standing) return null;
+            return {
+                ...payrollTeam,
+                ...standing,
+                winPct: standing.wins / (standing.wins + standing.losses),
+            };
+        }).filter(Boolean); // Filter out teams not found in standings
+
+        const payrollsNumeric = data.map(t => t.payroll).sort((a, b) => a - b);
+        const payrollMedian = payrollsNumeric[Math.floor(payrollsNumeric.length / 2)];
+        const performanceMedian = 0.500;
+
+        return data.map(team => ({
+            ...team,
+            efficiency: (team.winPct / (team.payroll / 100)).toFixed(3),
+            quadrant: getQuadrant(team.payroll, team.winPct, payrollMedian, performanceMedian),
+            quadrantLabel: getQuadrantLabel(getQuadrant(team.payroll, team.winPct, payrollMedian, performanceMedian))
+        }));
+    }
+
+    // --- QUADRANT HELPERS ---
+    function getQuadrant(payroll, winPct, payrollMedian, performanceMedian) {
+        if (payroll >= payrollMedian && winPct >= performanceMedian) return 'high-high';
+        if (payroll < payrollMedian && winPct >= performanceMedian) return 'low-high';
+        if (payroll >= payrollMedian && winPct < performanceMedian) return 'high-low';
+        return 'low-low';
+    }
+
+    function getQuadrantLabel(quadrant) {
+        const labels = {
+            'high-high': 'Big Spenders (Success)', 'low-high': 'Overachievers',
+            'high-low': 'Underachievers', 'low-low': 'Rebuilding'
+        };
+        return labels[quadrant];
+    }
+
+    function getQuadrantColor(quadrant) {
+        const colors = {
+            'high-high': '#10b981', 'low-high': '#3b82f6',
+            'high-low': '#ef4444', 'low-low': '#f59e0b'
+        };
+        return colors[quadrant];
+    }
+
+    // --- RENDERING ---
+    function render() {
+        // Filter and sort data based on current state
+        const filteredData = state.enrichedData.filter(team => 
+            state.filterQuadrant === 'all' || team.quadrant === state.filterQuadrant
+        );
+
+        const sortedData = [...filteredData].sort((a, b) => {
+            if (state.sortBy === 'efficiency') return parseFloat(b.efficiency) - parseFloat(a.efficiency);
+            if (state.sortBy === 'payroll') return b.payroll - a.payroll;
+            return b.winPct - a.winPct;
+        });
+
+        // Update UI based on active view
+        updateActiveView();
+        
+        if (state.activeView === 'scatter') {
+             renderScatterPlot(filteredData);
+             dom.filterQuadrantSelect.disabled = false;
+        } else {
+             dom.filterQuadrantSelect.disabled = true;
+        }
+        
+        if (state.activeView === 'bar') renderBarChart(sortedData.slice(0, 15));
+        if (state.activeView === 'table') renderTable(sortedData.slice(0, 10));
+
+        renderQuickStats();
+        renderKeyInsights();
+    }
+
+    function updateActiveView() {
+        dom.viewBtns.forEach(btn => {
+            const isSelected = btn.dataset.view === state.activeView;
+            btn.classList.toggle('bg-blue-600', isSelected);
+            btn.classList.toggle('text-white', isSelected);
+            btn.classList.toggle('shadow', isSelected);
+            btn.classList.toggle('bg-gray-200', !isSelected);
+            btn.classList.toggle('text-gray-700', !isSelected);
+        });
+
+        ['scatterPlotContainer', 'barChartContainer', 'tableContainer'].forEach(id => {
+            document.getElementById(id).classList.add('hidden');
+        });
+        document.getElementById(`${state.activeView}PlotContainer`)?.classList.remove('hidden');
+        document.getElementById(`${state.activeView}ChartContainer`)?.classList.remove('hidden');
+        document.getElementById(`${state.activeView}Container`)?.classList.remove('hidden');
+    }
+
+    function renderScatterPlot(data) {
+        if (state.chartInstance) state.chartInstance.destroy();
+        
+        const payrollMedian = state.enrichedData.map(t => t.payroll).sort((a, b) => a - b)[Math.floor(state.enrichedData.length / 2)];
+
+        const datasets = data.map(team => ({
+            label: team.team,
+            data: [{ x: team.payroll, y: team.winPct }],
+            backgroundColor: getQuadrantColor(team.quadrant),
+            pointRadius: 6,
+            pointHoverRadius: 9,
+        }));
+        
+        const ctx = document.getElementById('scatterChart').getContext('2d');
+        state.chartInstance = new Chart(ctx, {
+            type: 'scatter',
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => {
+                                const team = data.find(t => t.team === context.dataset.label);
+                                return [
+                                    `${team.fullName} (${team.team})`,
+                                    `Payroll: $${team.payroll.toFixed(2)}M`,
+                                    `Win %: ${(team.winPct * 100).toFixed(1)}%`,
+                                    `Record: ${team.wins}-${team.losses}`,
+                                    `Efficiency: ${team.efficiency}`
+                                ];
+                            }
+                        }
+                    },
+                    annotation: {
+                        annotations: {
+                            line1: { type: 'line', yMin: 0.5, yMax: 0.5, borderColor: 'grey', borderWidth: 2, borderDash: [6, 6] },
+                            line2: { type: 'line', xMin: payrollMedian, xMax: payrollMedian, borderColor: 'grey', borderWidth: 2, borderDash: [6, 6] }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: 'linear',
+                        position: 'bottom',
+                        title: { display: true, text: 'Payroll (Millions USD)', font: { size: 14 } }
+                    },
+                    y: {
+                        title: { display: true, text: 'Winning Percentage', font: { size: 14 } },
+                        ticks: { callback: (value) => (value * 100) + '%' }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderBarChart(data) {
+        if(state.barChartInstance) state.barChartInstance.destroy();
+        const ctx = document.getElementById('barChart').getContext('2d');
+        state.barChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: data.map(d => d.team),
+                datasets: [{
+                    label: state.sortBy,
+                    data: data.map(d => d[state.sortBy]),
+                    backgroundColor: data.map(d => getQuadrantColor(d.quadrant)),
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                         callbacks: {
+                            label: (context) => {
+                                const team = data[context.dataIndex];
+                                let value = context.raw;
+                                if (state.sortBy === 'payroll') value = `$${value.toFixed(2)}M`;
+                                if (state.sortBy === 'winPct') value = `${(value * 100).toFixed(1)}%`;
+                                return `${team.fullName}: ${value}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                         ticks: {
+                            callback: (value) => {
+                                if (state.sortBy === 'payroll') return `$${value}M`;
+                                if (state.sortBy === 'winPct') return `${(value * 100).toFixed(0)}%`;
+                                return value;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderTable(data) {
+        let html = `
+            <table class="min-w-full table-auto border-collapse">
+                <thead>
+                    <tr class="bg-gray-100"><th class="border p-2 text-left">Rank</th><th class="border p-2 text-left">Team</th><th class="border p-2 text-left">Payroll</th><th class="border p-2 text-left">Record</th><th class="border p-2 text-left">Win %</th><th class="border p-2 text-left">Efficiency</th><th class="border p-2 text-left">Category</th></tr>
+                </thead>
+                <tbody>`;
+        data.forEach((team, index) => {
+            html += `
+                <tr class="hover:bg-gray-50">
+                    <td class="border p-2">${index + 1}</td>
+                    <td class="border p-2"><div><span class="font-semibold">${team.team}</span><div class="text-xs text-gray-600">${team.fullName}</div></div></td>
+                    <td class="border p-2">$${team.payroll.toFixed(2)}M</td>
+                    <td class="border p-2">${team.wins}-${team.losses}</td>
+                    <td class="border p-2">${(team.winPct * 100).toFixed(1)}%</td>
+                    <td class="border p-2">${team.efficiency}</td>
+                    <td class="border p-2"><span class="px-2 py-1 rounded text-xs text-white" style="background-color: ${getQuadrantColor(team.quadrant)}">${team.quadrantLabel}</span></td>
+                </tr>`;
+        });
+        html += '</tbody></table>';
+        dom.tableContainer.innerHTML = html;
+    }
+    
+    function renderQuickStats() {
+        const quadrantStats = {
+            'high-high': state.enrichedData.filter(t => t.quadrant === 'high-high'),
+            'low-high': state.enrichedData.filter(t => t.quadrant === 'low-high'),
+            'high-low': state.enrichedData.filter(t => t.quadrant === 'high-low'),
+            'low-low': state.enrichedData.filter(t => t.quadrant === 'low-low')
+        };
+        
+        dom.quickStats.innerHTML = Object.entries(quadrantStats).map(([quadrant, teams]) => {
+            const avgWinPct = teams.length > 0 ? (teams.reduce((sum, t) => sum + t.winPct, 0) / teams.length * 100).toFixed(1) : '0.0';
+            return `
+                <div class="text-center p-3 rounded-lg" style="background-color: ${getQuadrantColor(quadrant)}20">
+                    <div class="font-bold text-2xl" style="color: ${getQuadrantColor(quadrant)}">${teams.length}</div>
+                    <div class="text-sm font-semibold text-gray-700">${getQuadrantLabel(quadrant).replace(/ \(.+\)/, '')}</div>
+                    <div class="text-xs text-gray-600 mt-1">Avg Win %: ${avgWinPct}%</div>
+                </div>
+            `;
+        }).join('');
+    }
+    
+    function renderKeyInsights() {
+        const sortedByEfficiency = [...state.enrichedData].sort((a,b) => parseFloat(b.efficiency) - parseFloat(a.efficiency));
+        const underachievers = state.enrichedData.filter(t => t.quadrant === 'high-low').sort((a,b) => b.payroll - a.payroll);
+        const overachievers = state.enrichedData.filter(t => t.quadrant === 'low-high').sort((a,b) => b.winPct - a.winPct);
+
+        dom.keyInsights.innerHTML = `
+            <p>• <strong>Best Efficiency:</strong> ${sortedByEfficiency[0].team} (${sortedByEfficiency[0].efficiency})</p>
+            <p>• <strong>Biggest Underachiever:</strong> ${underachievers[0]?.team || 'N/A'} ($${underachievers[0]?.payroll.toFixed(2)}M, ${(underachievers[0]?.winPct * 100).toFixed(1)}%)</p>
+            <p>• <strong>Top Overachiever:</strong> ${overachievers[0]?.team || 'N/A'} ($${overachievers[0]?.payroll.toFixed(2)}M, ${(overachievers[0]?.winPct * 100).toFixed(1)}%)</p>
+        `;
+    }
+
+    // --- EVENT LISTENERS ---
+    dom.viewBtns.forEach(btn => btn.addEventListener('click', () => {
+        state.activeView = btn.dataset.view;
+        render();
+    }));
+    dom.sortBySelect.addEventListener('change', (e) => {
+        state.sortBy = e.target.value;
+        render();
+    });
+    dom.filterQuadrantSelect.addEventListener('change', (e) => {
+        state.filterQuadrant = e.target.value;
+        render();
+    });
+
+    // --- INITIALIZATION ---
+    async function init() {
+        const data = await fetchData();
+        if (data) {
+            state.enrichedData = data;
+            dom.loader.classList.add('hidden');
+            dom.dashboardContent.classList.remove('hidden');
+            render();
+        }
+    }
+    init();
+});
+</script>
+
+</body>
+</html>
+
